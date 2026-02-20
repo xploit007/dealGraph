@@ -4,6 +4,38 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as d3 from "d3";
 import { Competitor } from "@/lib/types";
 
+// ── Fallback list when D3 graph fails ──
+
+function CompetitorListFallback({ competitors }: { competitors: Competitor[] }) {
+  return (
+    <div className="space-y-1.5 p-4 overflow-auto">
+      {competitors.map((c) => (
+        <div
+          key={c.name}
+          className="flex items-center justify-between rounded-lg px-3 py-2"
+          style={{ backgroundColor: "rgba(42, 42, 58, 0.3)" }}
+        >
+          <div className="flex items-center gap-2.5">
+            <div
+              className="h-2 w-2 rounded-full"
+              style={{ backgroundColor: "#4ecdc4" }}
+            />
+            <span className="text-xs font-medium text-[var(--dg-text)]">
+              {c.name}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-[var(--dg-dim)]">
+            <span>{c.stage}</span>
+            <span className="font-medium text-[var(--dg-text)]">
+              {formatFunding(c.total_raised)}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function formatFunding(amount: number): string {
   if (amount >= 1_000_000_000) {
     const b = amount / 1_000_000_000;
@@ -97,11 +129,14 @@ export default function CompetitiveGraph({
     y: number;
     data: GraphNode;
   } | null>(null);
+  const [graphError, setGraphError] = useState(false);
 
   const buildGraph = useCallback(() => {
     const container = containerRef.current;
     const svg = svgRef.current;
     if (!container || !svg || !competitors || competitors.length === 0) return;
+
+    try {
 
     const width = container.clientWidth;
     const height = container.clientHeight;
@@ -112,9 +147,22 @@ export default function CompetitiveGraph({
     }
     d3.select(svg).selectAll("*").remove();
     setTooltip(null);
+    setGraphError(false);
+
+    // Ensure the target company exists in the data
+    const graphCompetitors = [...competitors];
+    const hasTarget = graphCompetitors.some((c) => c.name === targetCompany);
+    if (!hasTarget) {
+      graphCompetitors.unshift({
+        name: targetCompany,
+        total_raised: 5_000_000,
+        stage: "Series A",
+        employee_count: 25,
+      });
+    }
 
     // Build radius scale - logarithmic
-    const fundingValues = competitors.map((c) => c.total_raised);
+    const fundingValues = graphCompetitors.map((c) => c.total_raised);
     const radiusScale = d3
       .scaleLog()
       .domain([Math.min(...fundingValues), Math.max(...fundingValues)])
@@ -122,9 +170,9 @@ export default function CompetitiveGraph({
       .clamp(true);
 
     // Build nodes - start off-screen for fly-in effect
-    const nodes: GraphNode[] = competitors.map((c, idx) => {
+    const nodes: GraphNode[] = graphCompetitors.map((c, idx) => {
       const isTarget = c.name === targetCompany;
-      const angle = (idx / competitors.length) * Math.PI * 2;
+      const angle = (idx / graphCompetitors.length) * Math.PI * 2;
       return {
         id: c.name,
         name: c.name,
@@ -139,7 +187,7 @@ export default function CompetitiveGraph({
     });
 
     // Build links from target to every other node
-    const links: GraphLink[] = competitors
+    const links: GraphLink[] = graphCompetitors
       .filter((c) => c.name !== targetCompany)
       .map((c) => ({
         source: targetCompany,
@@ -242,17 +290,6 @@ export default function CompetitiveGraph({
     // Label background pills + text
     const labelGroups = nodeSel.append("g").attr("class", "label-group");
 
-    // Add background rect (sized after text renders)
-    labelGroups
-      .append("rect")
-      .attr("rx", 4)
-      .attr("ry", 4)
-      .attr("fill", "rgba(10, 10, 15, 0.75)")
-      .attr("stroke", (d: GraphNode) =>
-        d.isTarget ? "rgba(108, 92, 231, 0.3)" : "rgba(42, 42, 58, 0.5)"
-      )
-      .attr("stroke-width", 0.5);
-
     labelGroups
       .append("text")
       .attr("text-anchor", "middle")
@@ -262,22 +299,6 @@ export default function CompetitiveGraph({
       .attr("font-weight", (d: GraphNode) => (d.isTarget ? "600" : "400"))
       .attr("font-family", "var(--font-dm-sans), system-ui, sans-serif")
       .text((d: GraphNode) => d.name);
-
-    // Size the pill backgrounds after text renders
-    labelGroups.each(function (d: GraphNode) {
-      const group = d3.select(this);
-      const textEl = group.select("text").node() as SVGTextElement;
-      if (!textEl) return;
-      const bbox = textEl.getBBox();
-      const padX = 6;
-      const padY = 3;
-      group
-        .select("rect")
-        .attr("x", bbox.x - padX)
-        .attr("y", d.radius + 16 + bbox.y - padY)
-        .attr("width", bbox.width + padX * 2)
-        .attr("height", bbox.height + padY * 2);
-    });
 
     labelGroups
       .attr("opacity", 0)
@@ -423,6 +444,11 @@ export default function CompetitiveGraph({
       });
 
     simulationRef.current = simulation;
+
+    } catch (err) {
+      console.error("[CompetitiveGraph] D3 rendering failed:", err);
+      setGraphError(true);
+    }
   }, [competitors, targetCompany]);
 
   useEffect(() => {
@@ -464,7 +490,11 @@ export default function CompetitiveGraph({
         style={{ backgroundColor: "#0a0a0f" }}
       >
         {loading && !hasCompetitors && <GraphLoadingPlaceholder />}
-        <svg ref={svgRef} className="h-full w-full" style={{ display: hasCompetitors ? "block" : "none" }} />
+        {graphError && hasCompetitors ? (
+          <CompetitorListFallback competitors={competitors} />
+        ) : (
+          <svg ref={svgRef} className="h-full w-full" style={{ display: hasCompetitors ? "block" : "none" }} />
+        )}
 
         {/* Tooltip */}
         {tooltip && (

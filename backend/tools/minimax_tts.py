@@ -19,10 +19,10 @@ def generate_audio(text: str) -> str:
 
     try:
         response = requests.post(
-            "https://api.minimaxi.com/v1/t2a_v2",
+            f"https://api.minimax.io/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}",
             headers={
                 "Authorization": f"Bearer {MINIMAX_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
             json={
                 "model": "speech-02-turbo",
@@ -32,22 +32,22 @@ def generate_audio(text: str) -> str:
                     "voice_id": "male-qn-qingse",
                     "speed": 1.05,
                     "vol": 1.0,
-                    "pitch": 0
-                }
+                    "pitch": 0,
+                },
             },
-            timeout=30
+            timeout=30,
         )
 
         if response.status_code == 200:
             data = response.json()
-            if data.get("data", {}).get("audio"):
-                import base64
-                audio_bytes = base64.b64decode(data["data"]["audio"])
+            audio_hex = data.get("data", {}).get("audio", "")
+            if audio_hex:
+                audio_bytes = bytes.fromhex(audio_hex)
                 with open(filepath, "wb") as f:
                     f.write(audio_bytes)
                 return filename
 
-        # Fallback if MiniMax fails
+        print(f"MiniMax TTS failed: {response.status_code} {response.text[:200]}")
         return "fallback_memo.mp3"
 
     except Exception as e:

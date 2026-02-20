@@ -49,7 +49,7 @@ Output a JSON list:
 
 Be specific in evidence. Cite exact numbers from the graph.
 If a company claims "no competitors" but you find competitors, that is a RED FLAG.
-Output ONLY valid JSON."""
+Output ONLY valid JSON. Do NOT use emojis."""
 
 fact_checker = Agent(
     model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0"),

@@ -29,7 +29,7 @@ Categories:
 - financial: Revenue projections, unit economics, margins
 
 Be thorough. Extract at least 5-10 claims. Focus on claims that CAN be checked against external data.
-Output ONLY valid JSON — no explanation, no markdown fences."""
+Output ONLY valid JSON - no explanation, no markdown fences, no emojis."""
 
 claim_extractor = Agent(
     model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0"),

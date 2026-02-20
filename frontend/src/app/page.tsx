@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useRef, Component, ReactNode } from "
 import { AnalysisResult } from "@/lib/types";
 import { mockAnalysisResult } from "@/lib/mock-data";
 import { analyzeDeck, healthCheck, resolveAudioUrl } from "@/lib/api";
+import { useCopilotAction } from "@copilotkit/react-core";
+import { CopilotSidebar } from "@copilotkit/react-ui";
 import ClaimTracker from "@/components/ClaimTracker";
 import DealScorecard from "@/components/DealScorecard";
 import CompetitiveGraph from "@/components/CompetitiveGraph";
@@ -323,6 +325,24 @@ function DealGraphApp() {
     [useMockData, showToast]
   );
 
+  // Register CopilotKit action so the chat sidebar can trigger analysis
+  useCopilotAction({
+    name: "analyzeDeck",
+    description: "Analyze a pitch deck for due diligence",
+    parameters: [
+      {
+        name: "deck_text",
+        type: "string",
+        description: "The pitch deck text to analyze",
+        required: true,
+      },
+    ],
+    handler: async ({ deck_text }: { deck_text: string }) => {
+      await handleAnalyze(deck_text);
+      return "Analysis complete. Results are displayed in the dashboard.";
+    },
+  });
+
   // Don't render until health check completes to avoid flash
   if (!backendChecked) {
     return (
@@ -343,7 +363,7 @@ function DealGraphApp() {
 
   return (
     <div
-      className="flex h-screen flex-col overflow-hidden"
+      className="flex h-screen flex-col"
       style={{ backgroundColor: "var(--dg-bg)" }}
     >
       {/* ── Header ── */}
@@ -432,10 +452,12 @@ function DealGraphApp() {
         </div>
       </header>
 
-      {/* ── Main Content ── */}
-      <div className="flex min-h-0 flex-1">
-        {/* Left Column - Upload + Chat/Status (40%) */}
-        <div className="flex w-[40%] flex-col border-r border-[var(--dg-border)]">
+      {/* ── Main Content (scrollable) ── */}
+      <div className="flex-1 overflow-y-auto">
+        {/* Row 1: Upload/Chat + Competitive Graph */}
+        <div className="flex" style={{ minHeight: "420px" }}>
+          {/* Left Column - Upload + Chat/Status (40%) */}
+          <div className="flex w-[40%] flex-col border-r border-[var(--dg-border)]">
           {/* Upload Panel (shrinks to fit) */}
           {(!analysis || loading) && (
             <div className="dg-surface mx-3 mt-3 overflow-hidden rounded-lg">
@@ -444,7 +466,7 @@ function DealGraphApp() {
           )}
 
           {/* Chat / Status Panel (fills remaining) */}
-          <div className="dg-surface m-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg">
+          <div className="dg-surface m-3 flex min-h-[200px] flex-1 flex-col overflow-hidden rounded-lg">
             <DealChat
               analysis={analysis}
               loading={loading}
@@ -531,10 +553,10 @@ function DealGraphApp() {
             )}
           </div>
         </div>
-      </div>
+        </div>
 
-      {/* ── Bottom Panels ── */}
-      <div className="shrink-0 border-t border-[var(--dg-border)] flex flex-col gap-3 p-3">
+        {/* ── Bottom Panels ── */}
+        <div className="flex flex-col gap-3 p-3">
         {/* Score + Voice Row */}
         <div className="flex gap-3">
           {/* Deal Scorecard */}
@@ -608,6 +630,47 @@ function DealGraphApp() {
           />
         </div>
       </div>
+      </div>
+
+      {/* Built-with footer */}
+      <div
+        className="flex shrink-0 items-center justify-center gap-2 py-1.5 transition-opacity duration-300"
+        style={{ opacity: 0.35 }}
+        onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
+        onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.35")}
+      >
+        <span className="text-[10px] text-[var(--dg-dim)]">Built with</span>
+        {[
+          { name: "AWS Bedrock", color: "#f59e0b" },
+          { name: "Strands Agents", color: "#f59e0b" },
+          { name: "Neo4j", color: "#22c55e" },
+          { name: "CopilotKit", color: "#a78bfa" },
+          { name: "MiniMax", color: "#3b82f6" },
+          { name: "Datadog", color: "#a78bfa" },
+        ].map((t) => (
+          <span
+            key={t.name}
+            className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+            style={{
+              backgroundColor: `${t.color}15`,
+              color: t.color,
+              border: `1px solid ${t.color}25`,
+            }}
+          >
+            {t.name}
+          </span>
+        ))}
+      </div>
+
+      {/* CopilotKit Sidebar */}
+      <CopilotSidebar
+        defaultOpen={false}
+        labels={{
+          title: "DealGraph AI",
+          initial:
+            "I can help you analyze pitch decks. Paste a deck or ask me about investment analysis.",
+        }}
+      />
 
       {/* Toast */}
       <Toast message={toastMessage} visible={toastVisible} />

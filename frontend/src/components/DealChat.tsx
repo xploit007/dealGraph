@@ -238,23 +238,6 @@ function StatusPanel({
   );
 }
 
-// ── CopilotKit Chat Panel ──
-
-function CopilotChatPanel() {
-  return (
-    <div className="copilotkit-chat-wrapper flex h-full flex-col overflow-hidden">
-      <CopilotChat
-        labels={{
-          title: "DealGraph",
-          initial: "Upload a pitch deck or describe a startup to analyze.",
-          placeholder: "Ask about the deal...",
-        }}
-        className="h-full"
-      />
-    </div>
-  );
-}
-
 // ── Main DealChat Component ──
 
 interface DealChatProps {
@@ -276,7 +259,16 @@ export default function DealChat({
     <ChatErrorBoundary
       fallback={<StatusPanel analysis={analysis} loading={loading} />}
     >
-      <CopilotChatPanel />
+      <div className="copilotkit-chat-wrapper flex h-full flex-col overflow-hidden">
+        <CopilotChat
+          labels={{
+            title: "DealGraph",
+            initial: "Upload a pitch deck or describe a startup to analyze.",
+            placeholder: "Ask about the deal...",
+          }}
+          className="h-full"
+        />
+      </div>
     </ChatErrorBoundary>
   );
 }

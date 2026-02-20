@@ -1,5 +1,8 @@
+import json
+
 from strands import Agent, tool
 from strands.models.bedrock import BedrockModel
+from agents import shared_state
 
 
 @tool
@@ -26,7 +29,12 @@ def compute_deal_score(team: float, market: float, traction: float, competition:
         "breakdown": {"team": team, "market": market, "traction": traction, "competition": competition, "financials": financials},
         "recommendation": rec
     }
-    return str(result)
+    score_json = json.dumps(result)
+    # Write directly to shared_state so we capture the structured data,
+    # not the agent's prose commentary that wraps it
+    shared_state.analysis_state["score"] = score_json
+    print(f"[DEBUG compute_deal_score] Saved score to shared_state: {score_json}")
+    return score_json
 
 
 SCORER_PROMPT = """You are a seasoned VC partner scoring a deal.
@@ -42,7 +50,8 @@ Use the compute_deal_score tool with your ratings.
 
 Be rigorous. A 7+ should mean genuinely strong signal.
 If claims were red-flagged (contradicted by data), score that dimension lower.
-If claims were unverifiable, dock points for lack of transparency."""
+If claims were unverifiable, dock points for lack of transparency.
+Do NOT use emojis in your output."""
 
 deal_scorer = Agent(
     model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0"),
