@@ -8,7 +8,7 @@ const runtimeUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <CopilotKit runtimeUrl={runtimeUrl} agent="default">
+    <CopilotKit runtimeUrl={runtimeUrl} agent="default" showDevConsole={false} enableInspector={false}>
       {children}
     </CopilotKit>
   );

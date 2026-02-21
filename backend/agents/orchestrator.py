@@ -103,8 +103,10 @@ After each step, briefly note what was found before moving to the next step.
 Be thorough but concise. Investors value precision over verbosity.
 Do NOT use emojis anywhere in your output."""
 
-orchestrator = Agent(
-    model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0"),
-    system_prompt=ORCHESTRATOR_PROMPT,
-    tools=[extract_claims, fact_check_claims, score_deal, write_memo]
-)
+def create_orchestrator():
+    """Create a fresh orchestrator agent (no memory from previous analyses)."""
+    return Agent(
+        model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514-v1:0"),
+        system_prompt=ORCHESTRATOR_PROMPT,
+        tools=[extract_claims, fact_check_claims, score_deal, write_memo]
+    )

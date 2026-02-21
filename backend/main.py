@@ -22,7 +22,7 @@ import re
 import types
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -32,6 +32,12 @@ import uuid
 import logging
 
 load_dotenv()
+
+# ag_ui_strands: official Strands <-> CopilotKit bridge via AG-UI protocol
+from strands import Agent as StrandsNativeAgent, tool as strands_tool
+from strands.models.bedrock import BedrockModel as StrandsBedrockModel
+from ag_ui_strands import StrandsAgent, StrandsAgentConfig
+from ag_ui_strands.endpoint import EventEncoder, RunAgentInput
 
 # Suppress noisy ddtrace "failed to send traces" spam
 logging.getLogger("ddtrace").setLevel(logging.CRITICAL)
@@ -135,7 +141,7 @@ def _parse_json_from_text(text: str):
     return None
 
 
-def _build_response_from_shared_state(company_name: str = "Acme Payments") -> dict | None:
+def _build_response_from_shared_state(company_name: str = "") -> dict | None:
     """Build API response from shared_state. Returns None if insufficient data."""
     from agents import shared_state
     from tools.neo4j_tools import find_competitors
@@ -199,13 +205,21 @@ def _build_response_from_shared_state(company_name: str = "Acme Payments") -> di
         score["recommendation"] = "Further Diligence"
 
     try:
-        comps = find_competitors(company_name)
+        comps = find_competitors(company_name) if company_name else []
         competitors = [
             {"name": c.get("name"), "total_raised": c.get("total_raised"), "stage": c.get("stage"), "employee_count": c.get("employee_count")}
             for c in comps
         ]
-    except Exception:
+        _log(f"[DEBUG build_response] find_competitors('{company_name}') returned {len(competitors)} results")
+    except Exception as e:
+        _log(f"[DEBUG build_response] find_competitors error: {e}")
         competitors = []
+
+    # Fallback: if no competitors from Neo4j, use fallback data so graph is never empty
+    if not competitors:
+        _log("[DEBUG build_response] No competitors from Neo4j — using fallback competitors")
+        fallback = _load_fallback_response()
+        competitors = fallback.get("competitors", [])
 
     return {
         "status": "complete",
@@ -213,13 +227,34 @@ def _build_response_from_shared_state(company_name: str = "Acme Payments") -> di
         "score": score,
         "memo": memo,
         "audio_url": f"/api/audio/{audio_filename}",
-        "competitors": competitors
+        "competitors": competitors,
+        "company_name": company_name,
     }
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/extract-pdf")
+async def extract_pdf(file: UploadFile = File(...)):
+    """Extract text from an uploaded PDF file using PyPDF2."""
+    import io
+    from PyPDF2 import PdfReader
+
+    try:
+        contents = await file.read()
+        reader = PdfReader(io.BytesIO(contents))
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            pages.append(text)
+        full_text = "\n\n".join(pages)
+        return {"text": full_text, "pages": len(reader.pages), "chars": len(full_text)}
+    except Exception as e:
+        _log(f"[PDF Extract] Error: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @app.post("/api/analyze")
@@ -240,61 +275,210 @@ async def get_audio(filename: str):
     return {"error": "Audio not found"}
 
 
+def _collapse_spaced_text(text: str) -> str:
+    """Fix spaced-out text from PDF extraction (e.g., 'A C M E' → 'ACME')."""
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append("")
+            continue
+        # Check if line has spaced-out characters (common in decorative PDF fonts)
+        tokens = stripped.split(" ")
+        non_empty = [t for t in tokens if t]
+        if len(non_empty) > 3:
+            single_char = sum(1 for t in non_empty if len(t) == 1)
+            if single_char / len(non_empty) > 0.5:
+                # Collapse: multi-spaces → word boundary, single spaces → join
+                result = re.sub(r'  +', '\x00', stripped)
+                result = result.replace(' ', '')
+                result = result.replace('\x00', ' ')
+                # Remove non-alphanumeric prefix artifacts (like ⚔ emoji)
+                result = re.sub(r'^[^\w\s]+', '', result).strip()
+                stripped = result
+        cleaned.append(stripped)
+    return "\n".join(cleaned)
+
+
+def _extract_company_name(deck_text: str) -> str:
+    """Try to extract the company name from the pitch deck text."""
+    # Clean spaced-out PDF artifacts first
+    cleaned_text = _collapse_spaced_text(deck_text)
+    lines = cleaned_text.strip().split("\n")
+
+    # Strategy 1: Look for "CompanyName - Pitch Deck" or "CompanyName — Series A" patterns
+    for line in lines[:15]:
+        line = line.strip()
+        if not line:
+            continue
+        for sep in [" - ", " — ", " – ", " | "]:
+            if sep in line:
+                name = line.split(sep)[0].strip()
+                if 1 < len(name) < 60:
+                    return name
+
+    # Strategy 2: First short non-generic line
+    skip_words = ["problem", "solution", "market", "team", "traction", "confidential",
+                   "investor", "overview", "agenda", "table of contents", "disclaimer"]
+    for line in lines[:15]:
+        line = line.strip()
+        if not line or len(line) > 80:
+            continue
+        if any(line.lower().startswith(skip) for skip in skip_words):
+            continue
+        if re.match(r'^[A-Z\s:]+$', line) and len(line) < 20:
+            continue
+        if len(line) > 1:
+            return line
+    return ""
+
+
 async def _analyze_deck_internal(deck_text: str) -> dict:
     """Core analysis pipeline, shared by REST endpoint and CopilotKit action."""
     from agents import shared_state
-    from agents.orchestrator import orchestrator
+    from agents.orchestrator import create_orchestrator
 
+    # Reset shared state for this analysis
     shared_state.analysis_state = {
         "claims": [], "fact_checks": [], "score": {},
         "memo": "", "audio_filename": "", "competitors": []
     }
 
+    company_name = _extract_company_name(deck_text)
+    _log(f"[Pipeline] Extracted company name: '{company_name}'")
+    _log(f"[Pipeline] Deck text length: {len(deck_text)} chars")
+
     try:
-        orchestrator(f"Analyze this pitch deck:\n\n{deck_text}")
-        result = _build_response_from_shared_state()
+        # Create a FRESH agent for each analysis — no memory from previous runs
+        agent = create_orchestrator()
+        agent(f"Analyze this pitch deck:\n\n{deck_text}")
+        result = _build_response_from_shared_state(company_name)
         if result:
             claims_ok = isinstance(result.get("claims"), list) and len(result["claims"]) > 0
             memo_ok = isinstance(result.get("memo"), str) and len(result["memo"]) > 0
             score_ok = isinstance(result.get("score"), dict) and result["score"].get("overall", 0) > 0
+
+            _log(f"[Pipeline] Validation: claims_ok={claims_ok} memo_ok={memo_ok} score_ok={score_ok}")
+
             if claims_ok and memo_ok and score_ok:
-                _log("[CopilotKit] PIPELINE RESULT ACCEPTED")
+                _log("[Pipeline] RESULT ACCEPTED (full)")
                 return result
+
+            _log("[Pipeline] Partial results — falling back to saved data")
     except Exception as e:
         import traceback
-        _log(f"Pipeline error: {e}")
+        _log(f"[Pipeline] Error: {e}")
         traceback.print_exc()
 
-    return _load_fallback_response()
+    # Fallback: use fallback_response.json if available
+    _log("[Pipeline] Using fallback response")
+    fallback = _load_fallback_response()
+    fallback["company_name"] = company_name or fallback.get("company_name", "")
+    return fallback
 
 
-# ── CopilotKit AG-UI Protocol Endpoint ──
-# Manual implementation (CopilotKit SDK's built-in endpoint doesn't register
-# a proper AG-UI agent, causing "Agent 'default' not found" on v1.50+).
+# ── CopilotKit AG-UI Protocol via ag_ui_strands ──
+# Uses the official Strands <-> CopilotKit bridge for proper AG-UI integration.
+# The Strands agent has knowledge-graph tools; CopilotKit renders Generative UI
+# for each tool call in the chat sidebar.
 
-_COPILOTKIT_INFO = {
+@strands_tool
+def query_competitors(company_name: str) -> str:
+    """Find competitors for a company in the knowledge graph. Returns competitor names, funding amounts, and market data."""
+    from tools.neo4j_tools import find_competitors
+    result = find_competitors(company_name)
+    return str(result)
+
+
+@strands_tool
+def verify_founder_background(founder_name: str) -> str:
+    """Verify a founder's background and experience in the knowledge graph."""
+    from tools.neo4j_tools import verify_founder
+    result = verify_founder(founder_name)
+    return str(result)
+
+
+@strands_tool
+def check_market(market_name: str) -> str:
+    """Check market size and growth data in the knowledge graph."""
+    from tools.neo4j_tools import check_market_data
+    result = check_market_data(market_name)
+    return str(result)
+
+
+# Create the Strands agent with knowledge-graph tools
+_bedrock_model = StrandsBedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name=os.getenv("AWS_DEFAULT_REGION", "us-west-2"),
+)
+
+_strands_agent = StrandsNativeAgent(
+    model=_bedrock_model,
+    system_prompt="""You are DealGraph, an AI due diligence copilot. The analysis context is provided with each message.
+
+CRITICAL RULES:
+1. ALWAYS use your tools. The UI renders beautiful visual cards for each tool call. Your tools ARE the answer.
+2. Keep text to 1-2 sentences MAX. The visual cards from tools are the primary output, not text.
+3. NEVER write long paragraphs. Just call the tool and add a brief summary sentence after.
+4. When asked about founders: call verify_founder_background for EACH founder name found in context.
+5. When asked about competitors or funding: call query_competitors.
+6. When asked about market: call check_market.
+7. Do NOT repeat data that the tool will show in its visual card.
+8. Do NOT use emojis.
+
+Example good response to "tell me about the founders":
+- Look at the analysis context to find founder names
+- Call verify_founder_background for EACH founder name found
+- Text: "Here are the verification results for both founders."
+
+Example BAD response (DO NOT DO THIS):
+- Writing 3 paragraphs about each founder's background from context without calling tools.""",
+    tools=[query_competitors, verify_founder_background, check_market],
+)
+
+# StateContextBuilder: inject CopilotKit's useCopilotReadable context into the user message
+# ag_ui_strands does NOT automatically pass the context field to the Strands agent,
+# so we must manually prepend it to the user message.
+def _inject_copilotkit_context(input_data: RunAgentInput, user_message: str) -> str:
+    """Prepend CopilotKit readable context (from useCopilotReadable) to the user message."""
+    context_parts = []
+    if hasattr(input_data, "context") and input_data.context:
+        for ctx in input_data.context:
+            desc = getattr(ctx, "description", "") or ""
+            val = getattr(ctx, "value", "") or ""
+            if val:
+                context_parts.append(f"[{desc}]: {val}" if desc else val)
+
+    if context_parts:
+        context_block = "\n\n".join(context_parts)
+        print(f"[CopilotKit] Injecting context ({len(context_block)} chars) into user message", file=sys.stderr, flush=True)
+        return f"--- ANALYSIS CONTEXT FROM DASHBOARD ---\n{context_block}\n--- END CONTEXT ---\n\nUser question: {user_message}"
+
+    print("[CopilotKit] No context found in input_data", file=sys.stderr, flush=True)
+    return user_message
+
+
+# Wrap for AG-UI protocol with context injection
+_ag_ui_agent = StrandsAgent(
+    _strands_agent,
+    name="default",
+    description=(
+        "DealGraph AI Due Diligence Agent - analyzes pitch decks, "
+        "verifies claims against knowledge graph, scores deals, "
+        "and generates investment memos"
+    ),
+    config=StrandsAgentConfig(
+        state_context_builder=_inject_copilotkit_context,
+    ),
+)
+
+# Agent info for CopilotKit discovery
+_AGENT_INFO = {
     "agents": {
         "default": {
             "name": "default",
-            "description": (
-                "DealGraph AI Due Diligence Agent - analyzes pitch decks, "
-                "verifies claims against knowledge graph, scores deals, "
-                "and generates investment memos"
-            ),
-        }
-    },
-    "actions": {
-        "analyzeDeck": {
-            "name": "analyzeDeck",
-            "description": "Analyze a startup pitch deck",
-            "parameters": [
-                {
-                    "name": "deck_text",
-                    "type": "string",
-                    "description": "Pitch deck text to analyze",
-                    "required": True,
-                }
-            ],
+            "description": _ag_ui_agent.description,
         }
     },
 }
@@ -304,81 +488,82 @@ _COPILOTKIT_INFO = {
 @app.post("/copilotkit/")
 @app.post("/copilotkit/{path:path}")
 async def copilotkit_handler(request: Request, path: str = ""):
-    """CopilotKit AG-UI protocol handler."""
+    """CopilotKit AG-UI endpoint: handles info discovery + agent runs via ag_ui_strands."""
+    body = await request.body()
+    body_str = body.decode("utf-8", errors="replace")
+
+    print(f"[CopilotKit] path='{path}' len={len(body_str)}", file=sys.stderr, flush=True)
+
     try:
-        body = await request.body()
-        data = json.loads(body) if body else {}
+        data = json.loads(body_str) if body_str else {}
     except json.JSONDecodeError:
         data = {}
 
+    print(f"[CopilotKit] keys={list(data.keys())}", file=sys.stderr, flush=True)
+
+    # CopilotKit sends JSON-RPC: {method, params, body}
+    # The actual AG-UI fields (messages, thread_id, run_id) are nested inside "body"
     method = data.get("method", "")
+    agent_data = data.get("body", data)  # fallback to top-level for direct AG-UI calls
 
-    # ── Info request ──
-    if method == "info" or path == "info" or not method:
-        return JSONResponse(_COPILOTKIT_INFO)
+    print(f"[CopilotKit] method='{method}' agent_data_keys={list(agent_data.keys()) if isinstance(agent_data, dict) else type(agent_data).__name__}", file=sys.stderr, flush=True)
 
-    # ── Agent run request ──
-    if method == "agent/run" or "messages" in data:
-        messages = data.get("messages", data.get("body", {}).get("messages", []))
+    has_messages = isinstance(agent_data, dict) and "messages" in agent_data
+    has_thread = isinstance(agent_data, dict) and "thread_id" in agent_data
+    has_run = isinstance(agent_data, dict) and "run_id" in agent_data
+    is_agent_run = has_messages or has_thread or has_run
 
-        deck_text = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    deck_text = content
-                elif isinstance(content, list):
-                    deck_text = " ".join(
-                        c.get("text", "") for c in content if c.get("type") == "text"
-                    )
-                break
+    print(f"[CopilotKit] is_agent_run={is_agent_run} has_messages={has_messages} has_thread={has_thread} has_run={has_run}", file=sys.stderr, flush=True)
 
-        if not deck_text:
-            deck_text = data.get("deck_text", "No deck text provided")
+    if is_agent_run:
+        # AG-UI agent run request — delegate to Strands agent
+        print(f"[CopilotKit] Delegating to Strands agent via AG-UI", file=sys.stderr, flush=True)
 
-        async def stream_response():
-            run_id = str(uuid.uuid4())
-            thread_id = data.get("threadId", str(uuid.uuid4()))
-            tool_call_id = str(uuid.uuid4())
+        # Log messages to verify useCopilotReadable context is flowing through
+        if has_messages:
+            messages = agent_data.get("messages", [])
+            print(f"[CopilotKit] Message count: {len(messages)}", file=sys.stderr, flush=True)
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "unknown") if isinstance(msg, dict) else "?"
+                content = str(msg.get("content", ""))[:200] if isinstance(msg, dict) else str(msg)[:200]
+                print(f"[CopilotKit]   msg[{i}] role={role} content={content}", file=sys.stderr, flush=True)
 
-            yield f"data: {json.dumps({'type': 'run.start', 'runId': run_id, 'threadId': thread_id})}\n\n"
+        try:
+            input_data = RunAgentInput(**agent_data)
+        except Exception as e:
+            print(f"[CopilotKit] RunAgentInput validation error: {e}", file=sys.stderr, flush=True)
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"error": str(e)}, status_code=500)
 
-            # Emit tool call so CopilotKit triggers the frontend useCopilotAction
-            yield f"data: {json.dumps({'type': 'tool.call.start', 'toolCallId': tool_call_id, 'toolCallName': 'analyzeDeck'})}\n\n"
-            yield f"data: {json.dumps({'type': 'tool.call.args', 'toolCallId': tool_call_id, 'args': json.dumps({'deck_text': deck_text})})}\n\n"
-            yield f"data: {json.dumps({'type': 'tool.call.end', 'toolCallId': tool_call_id})}\n\n"
+        accept_header = request.headers.get("accept")
+        encoder = EventEncoder(accept=accept_header)
 
-            yield f"data: {json.dumps({'type': 'text.message.start', 'messageId': str(uuid.uuid4()), 'role': 'assistant'})}\n\n"
-            yield f"data: {json.dumps({'type': 'text.message.content', 'content': 'Analyzing pitch deck...'})}\n\n"
-            yield f"data: {json.dumps({'type': 'text.message.end'})}\n\n"
-
+        async def event_generator():
             try:
-                result = await _analyze_deck_internal(deck_text)
-
-                score = result.get("score", {}).get("overall", "N/A")
-                claims_count = len(result.get("claims", []))
-                recommendation = result.get("score", {}).get("recommendation", "N/A")
-                summary = (
-                    f"Analysis complete. Found {claims_count} claims. "
-                    f"Deal Score: {score}/10. Recommendation: {recommendation}."
-                )
-
-                # State update with full result for the frontend
-                yield f"data: {json.dumps({'type': 'state.update', 'state': {'analysisResult': result}})}\n\n"
-
-                yield f"data: {json.dumps({'type': 'text.message.start', 'messageId': str(uuid.uuid4()), 'role': 'assistant'})}\n\n"
-                yield f"data: {json.dumps({'type': 'text.message.content', 'content': summary})}\n\n"
-                yield f"data: {json.dumps({'type': 'text.message.end'})}\n\n"
+                async for event in _ag_ui_agent.run(input_data):
+                    try:
+                        encoded = encoder.encode(event)
+                        print(f"[CopilotKit] SSE event: {str(encoded)[:120]}", file=sys.stderr, flush=True)
+                        yield encoded
+                    except Exception as e:
+                        print(f"[CopilotKit] Encode error: {e}", file=sys.stderr, flush=True)
+                        from ag_ui_protocol import RunErrorEvent, EventType
+                        error_event = RunErrorEvent(
+                            type=EventType.RUN_ERROR,
+                            message=f"Encoding error: {str(e)}",
+                            code="ENCODING_ERROR",
+                        )
+                        yield encoder.encode(error_event)
+                        break
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'text.message.start', 'messageId': str(uuid.uuid4()), 'role': 'assistant'})}\n\n"
-                yield f"data: {json.dumps({'type': 'text.message.content', 'content': f'Analysis error: {str(e)}'})}\n\n"
-                yield f"data: {json.dumps({'type': 'text.message.end'})}\n\n"
-
-            yield f"data: {json.dumps({'type': 'run.end', 'runId': run_id})}\n\n"
+                print(f"[CopilotKit] Agent run error: {e}", file=sys.stderr, flush=True)
+                import traceback
+                traceback.print_exc()
 
         return StreamingResponse(
-            stream_response(),
-            media_type="text/event-stream",
+            event_generator(),
+            media_type=encoder.get_content_type(),
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
@@ -386,11 +571,13 @@ async def copilotkit_handler(request: Request, path: str = ""):
             },
         )
 
-    # ── Fallback ──
-    return JSONResponse(_COPILOTKIT_INFO)
+    # Info / discovery request — return available agents
+    print(f"[CopilotKit] Returning agent info", file=sys.stderr, flush=True)
+    return JSONResponse(_AGENT_INFO)
 
 
-_log("[DealGraph] CopilotKit AG-UI endpoint registered at /copilotkit")
+_log("[DealGraph] ag_ui_strands CopilotKit endpoint registered at /copilotkit")
+print(f"[DealGraph] AG-UI agent: {_ag_ui_agent}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

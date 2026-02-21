@@ -169,3 +169,76 @@
 .copilotkit-chat-wrapper .copilotKitInput:focus-within {
   border-color: #6c5ce7;
 }
+
+/* ── Full-page CopilotChat on /chat ── */
+.copilotkit-chat-fullpage {
+  overflow: hidden;
+}
+
+/* The CopilotChat component wraps in .copilotKitChat */
+.copilotkit-chat-fullpage .copilotKitChat {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  border: none !important;
+  background-color: #0a0a0f !important;
+  color: #e4e4ef !important;
+}
+
+/* The copilotKitWindow wrapper also needs full height */
+.copilotkit-chat-fullpage .copilotKitWindow {
+  height: 100% !important;
+}
+
+/* Messages area should scroll */
+.copilotkit-chat-fullpage .copilotKitMessages {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  background-color: transparent !important;
+}
+
+/* Input container sticks to bottom */
+.copilotkit-chat-fullpage .copilotKitInputContainer {
+  flex-shrink: 0 !important;
+  border-top: 1px solid #2a2a3a !important;
+  padding: 12px 16px !important;
+}
+
+.copilotkit-chat-fullpage .copilotKitInput {
+  background-color: #1a1a26 !important;
+  border: 1px solid #2a2a3a !important;
+  border-radius: 12px !important;
+  color: #e4e4ef !important;
+}
+
+.copilotkit-chat-fullpage .copilotKitInput:focus-within {
+  border-color: #6c5ce7 !important;
+}
+
+.copilotkit-chat-fullpage .copilotKitInput textarea {
+  color: #e4e4ef !important;
+}
+
+.copilotkit-chat-fullpage .copilotKitInput textarea::placeholder {
+  color: #6b6b80 !important;
+}
+
+/* Hide the CopilotKit header in full-page mode (we have our own) */
+.copilotkit-chat-fullpage .copilotKitHeader {
+  display: none !important;
+}
+
+/* Hide CopilotKit branding text (target only the <p> tag, not the input container) */
+p.poweredBy { display: none !important; }
+
+/* Hide debug buttons and dev console */
+[class*="devConsole"], [class*="DevConsole"] { display: none !important; }
+
+/* Hide reaction/feedback icons under messages */
+button[aria-label="Regenerate"], button[aria-label="Copy"], button[aria-label="Thumbs up"], button[aria-label="Thumbs down"] { display: none !important; }
+[class*="feedbackButtons"], [class*="FeedbackButtons"] { display: none !important; }
+[class*="ResponseActions"], [class*="responseActions"] { display: none !important; }
+
+/* Make tool cards full width in chat */
+[class*="toolCall"], [class*="ToolCall"] { width: 100% !important; max-width: 100% !important; }

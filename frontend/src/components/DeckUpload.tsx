@@ -2,21 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, DragEvent } from "react";
 
-const ACME_DECK_TEXT = `Acme Payments - Series A Pitch Deck
-
-PROBLEM: Cross-border B2B payments are broken. Enterprise companies lose 2-5% on every international transaction. Payment routing is manual, slow, and expensive.
-
-MARKET: The global digital payments market exceeds $50 billion and is growing at 15% year-over-year, driven by cross-border commerce and enterprise digitization.
-
-SOLUTION: Acme Payments is a next-generation B2B payment orchestration platform. AI-powered routing across 50+ payment rails, real-time reconciliation with ML-powered matching, and a single API for global B2B payments.
-
-TRACTION: We have achieved 3x year-over-year revenue growth and serve 500 enterprise customers across 12 countries. Current ARR is $2.3M with 98% net revenue retention.
-
-TEAM: CEO Jane Chen spent 4 years leading payments infrastructure at Stripe from 2019 to 2023. She built and scaled Stripe's cross-border payment routing system. CTO Marcus Rivera was the ML Platform Lead at Scale AI from 2020 to 2023, where he built ML infrastructure powering 500+ enterprise customers.
-
-COMPETITION: There are no direct competitors in AI-powered B2B payment orchestration. Existing players focus on consumer payments or basic merchant processing. Acme is the only platform combining AI routing with full B2B reconciliation.
-
-ASK: Raising $15M Series A at $60M pre-money valuation.`;
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const PROGRESS_STEPS = [
   "Extracting claims from pitch deck...",
@@ -26,6 +12,27 @@ const PROGRESS_STEPS = [
   "Generating investment memo...",
 ];
 
+/**
+ * Extract text from a PDF file by uploading to the backend.
+ */
+async function extractTextFromPdf(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_URL}/api/extract-pdf`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  return data.text || "";
+}
+
 interface DeckUploadProps {
   onAnalyze: (deckText: string) => void;
   loading: boolean;
@@ -34,8 +41,11 @@ interface DeckUploadProps {
 export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
   const [fileName, setFileName] = useState<string | null>(null);
   const [textInput, setTextInput] = useState("");
+  const [extractedPdfText, setExtractedPdfText] = useState("");
+  const [extracting, setExtracting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [progressIdx, setProgressIdx] = useState(0);
+  const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Cycle progress text while loading
@@ -50,9 +60,27 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
     return () => clearInterval(interval);
   }, [loading]);
 
-  const handleFile = useCallback((file: File) => {
+  const handleFile = useCallback(async (file: File) => {
     setFileName(file.name);
     setTextInput("");
+    setError("");
+    setExtracting(true);
+
+    try {
+      const text = await extractTextFromPdf(file);
+      if (text.trim().length < 20) {
+        setError("Could not extract text from PDF. Try pasting the text instead.");
+        setExtractedPdfText("");
+      } else {
+        setExtractedPdfText(text);
+      }
+    } catch (err) {
+      console.error("PDF extraction failed:", err);
+      setError("Failed to read PDF. Try pasting the text instead.");
+      setExtractedPdfText("");
+    } finally {
+      setExtracting(false);
+    }
   }, []);
 
   const handleDrop = useCallback(
@@ -68,8 +96,8 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
   );
 
   const handleAnalyze = () => {
-    // For hackathon: PDF always uses embedded Acme deck text
-    const text = fileName ? ACME_DECK_TEXT : textInput;
+    // Use extracted PDF text if available, otherwise use textarea input
+    const text = extractedPdfText || textInput;
     if (text.trim()) {
       onAnalyze(text);
     }
@@ -78,10 +106,11 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
   const handleClear = () => {
     setFileName(null);
     setTextInput("");
+    setExtractedPdfText("");
+    setError("");
     if (fileRef.current) fileRef.current.value = "";
   };
 
-  const [error, setError] = useState("");
   const hasFile = Boolean(fileName);
 
   // ── Loading state ──
@@ -158,7 +187,7 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
           </div>
         </div>
         <div className="flex flex-1 flex-col justify-center gap-4 p-5">
-          {/* File/text summary */}
+          {/* File summary */}
           <div
             className="flex items-center gap-3 rounded-lg px-4 py-3"
             style={{
@@ -170,44 +199,30 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
               style={{ backgroundColor: "rgba(108, 92, 231, 0.15)" }}
             >
-              {fileName ? (
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="var(--dg-accent)"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                </svg>
-              ) : (
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="var(--dg-accent)"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
-                </svg>
-              )}
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--dg-accent)"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-[var(--dg-text)]">
-                {fileName || "Text input"}
+                {fileName}
               </p>
               <p className="text-[11px] text-[var(--dg-dim)]">
-                {fileName
-                  ? "PDF ready for analysis"
-                  : `${textInput.length.toLocaleString()} characters`}
+                {extracting
+                  ? "Extracting text from PDF..."
+                  : extractedPdfText
+                    ? `${extractedPdfText.length.toLocaleString()} chars extracted`
+                    : "PDF ready"}
               </p>
             </div>
             <button
@@ -218,29 +233,44 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
             </button>
           </div>
 
+          {/* Error */}
+          {error && (
+            <p className="text-[11px] text-[#ff6b6b]">{error}</p>
+          )}
+
           {/* Analyze button */}
           <button
             onClick={handleAnalyze}
-            className="flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white transition-all hover:brightness-110"
+            disabled={extracting || (!extractedPdfText && !textInput)}
+            className="flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
               backgroundColor: "var(--dg-accent)",
-              boxShadow: "0 0 20px rgba(108, 92, 231, 0.3)",
+              boxShadow: extracting ? "none" : "0 0 20px rgba(108, 92, 231, 0.3)",
             }}
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="M21 21l-4.35-4.35" />
-            </svg>
-            Analyze Pitch Deck
+            {extracting ? (
+              <>
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-transparent border-t-white" />
+                Extracting PDF...
+              </>
+            ) : (
+              <>
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="M21 21l-4.35-4.35" />
+                </svg>
+                Analyze Pitch Deck
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -274,6 +304,7 @@ export default function DeckUpload({ onAnalyze, loading }: DeckUploadProps) {
             onChange={(e) => {
               setTextInput(e.target.value);
               setFileName(null);
+              setExtractedPdfText("");
               setError("");
             }}
             placeholder="Paste pitch deck text or drop a PDF..."

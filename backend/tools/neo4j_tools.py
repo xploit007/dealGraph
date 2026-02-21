@@ -23,9 +23,15 @@ def run_query(cypher: str, params: dict = None) -> list:
 
 
 def find_competitors(company_name: str) -> list:
-    """Find companies in the same market as the given company."""
+    """Find companies in the same market as the given company (fuzzy, case-insensitive)."""
+    # Try exact match first, then CONTAINS fallback for PDF-extracted names
     cypher = """
-    MATCH (c:Company {name: $name})-[:OPERATES_IN]->(m:Market)<-[:OPERATES_IN]-(comp:Company)
+    MATCH (c:Company)
+    WHERE toLower(c.name) = toLower($name)
+       OR toLower(c.name) CONTAINS toLower($name)
+       OR toLower($name) CONTAINS toLower(c.name)
+    WITH c LIMIT 1
+    MATCH (c)-[:OPERATES_IN]->(m:Market)<-[:OPERATES_IN]-(comp:Company)
     WHERE comp.name <> c.name
     RETURN comp.name AS name, comp.total_raised AS total_raised, comp.stage AS stage, comp.employee_count AS employee_count, m.name AS market
     ORDER BY comp.total_raised DESC

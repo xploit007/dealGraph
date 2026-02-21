@@ -5,7 +5,7 @@ const API_URL =
 
 export async function analyzeDeck(deckText: string): Promise<AnalysisResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120_000);
+  const timeout = setTimeout(() => controller.abort(), 300_000);
 
   try {
     const response = await fetch(`${API_URL}/api/analyze`, {

@@ -97,7 +97,7 @@ function StatusPanel({
       <div className="border-b border-[var(--dg-border)] px-4 py-3">
         <div className="flex items-center gap-2.5">
           <h2 className="text-sm font-medium text-[var(--dg-text)]">
-            AI Copilot
+            Analysis Pipeline
           </h2>
           {isComplete && (
             <span
@@ -139,7 +139,7 @@ function StatusPanel({
               Upload a pitch deck or describe a startup to analyze.
             </p>
             <p className="mt-1 text-[11px] text-[var(--dg-dim)] opacity-60">
-              AI copilot will guide the due diligence process
+              Pipeline will extract claims, verify facts, and score the deal
             </p>
           </div>
         ) : (

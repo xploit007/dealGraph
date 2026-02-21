@@ -34,4 +34,5 @@ export interface AnalysisResult {
   memo: string;
   audio_url: string;
   competitors: Competitor[];
+  company_name?: string;
 }

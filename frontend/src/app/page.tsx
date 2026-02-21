@@ -4,13 +4,12 @@ import { useState, useEffect, useCallback, useRef, Component, ReactNode } from "
 import { AnalysisResult } from "@/lib/types";
 import { mockAnalysisResult } from "@/lib/mock-data";
 import { analyzeDeck, healthCheck, resolveAudioUrl } from "@/lib/api";
-import { useCopilotAction } from "@copilotkit/react-core";
-import { CopilotSidebar } from "@copilotkit/react-ui";
 import ClaimTracker from "@/components/ClaimTracker";
 import DealScorecard from "@/components/DealScorecard";
 import CompetitiveGraph from "@/components/CompetitiveGraph";
 import DeckUpload from "@/components/DeckUpload";
 import DealChat from "@/components/DealChat";
+import CopilotPopupChat from "@/components/CopilotPopupChat";
 
 // ── Page-level Error Boundary ──
 
@@ -221,7 +220,6 @@ function DealGraphApp() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [useMockData, setUseMockData] = useState(false);
-  const [useCopilot, setUseCopilot] = useState(false);
   const [backendChecked, setBackendChecked] = useState(false);
 
   // Toast state
@@ -259,6 +257,19 @@ function DealGraphApp() {
     return () => { cancelled = true; };
   }, []);
 
+  // Clear stale analysis on mount; only save fresh data after a new analysis
+  useEffect(() => {
+    try { localStorage.removeItem("dealgraph_analysis"); } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (analysis) {
+      try {
+        localStorage.setItem("dealgraph_analysis", JSON.stringify(analysis));
+      } catch { /* ignore quota errors */ }
+    }
+  }, [analysis]);
+
   // Trigger cascade when analysis arrives
   useEffect(() => {
     if (!analysis) {
@@ -289,17 +300,17 @@ function DealGraphApp() {
           return next;
         });
       }
-      if (e.key === "k") {
-        e.preventDefault();
-        setUseCopilot((prev) => !prev);
-      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [showToast]);
 
+  const analyzingRef = useRef(false);
   const handleAnalyze = useCallback(
     async (deckText: string) => {
+      // Prevent concurrent/duplicate calls
+      if (analyzingRef.current) return;
+      analyzingRef.current = true;
       setLoading(true);
       setAnalysis(null);
 
@@ -309,39 +320,24 @@ function DealGraphApp() {
           setAnalysis(mockAnalysisResult);
         } else {
           const result = await analyzeDeck(deckText);
-          setAnalysis(result);
+          // Only accept results that have actual data
+          if (result && (result.claims?.length > 0 || result.score?.overall > 0 || result.memo)) {
+            setAnalysis(result);
+          } else {
+            console.warn("Analysis returned empty - using result anyway", result);
+            setAnalysis(result);
+          }
         }
       } catch (err) {
         console.error("Analysis failed:", err);
-        // Fall back to mock data on API failure
-        showToast("API unavailable - running in demo mode");
-        setUseMockData(true);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        setAnalysis(mockAnalysisResult);
+        showToast("Analysis failed - check backend connection");
       } finally {
         setLoading(false);
+        analyzingRef.current = false;
       }
     },
     [useMockData, showToast]
   );
-
-  // Register CopilotKit action so the chat sidebar can trigger analysis
-  useCopilotAction({
-    name: "analyzeDeck",
-    description: "Analyze a pitch deck for due diligence",
-    parameters: [
-      {
-        name: "deck_text",
-        type: "string",
-        description: "The pitch deck text to analyze",
-        required: true,
-      },
-    ],
-    handler: async ({ deck_text }: { deck_text: string }) => {
-      await handleAnalyze(deck_text);
-      return "Analysis complete. Results are displayed in the dashboard.";
-    },
-  });
 
   // Don't render until health check completes to avoid flash
   if (!backendChecked) {
@@ -465,12 +461,11 @@ function DealGraphApp() {
             </div>
           )}
 
-          {/* Chat / Status Panel (fills remaining) */}
+          {/* Status Panel (fills remaining) */}
           <div className="dg-surface m-3 flex min-h-[200px] flex-1 flex-col overflow-hidden rounded-lg">
             <DealChat
               analysis={analysis}
               loading={loading}
-              useCopilot={useCopilot}
             />
           </div>
 
@@ -508,7 +503,7 @@ function DealGraphApp() {
             style={{ opacity: loading ? 1 : showGraph || !analysis ? 1 : 0 }}
           >
             {showGraph && analysis ? (
-              <CompetitiveGraph competitors={analysis.competitors} />
+              <CompetitiveGraph competitors={analysis.competitors} targetCompany={analysis.company_name || "Target Company"} />
             ) : loading ? (
               <CompetitiveGraph loading={true} />
             ) : (
@@ -585,34 +580,44 @@ function DealGraphApp() {
                 </span>
               )}
             </div>
-            <div className="flex items-center justify-center py-4">
-              {showVoice && analysis?.audio_url ? (
-                <VoicePlayer audioUrl={analysis.audio_url} />
-              ) : loading ? (
-                <div className="flex items-center gap-3 px-6">
-                  <div
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full animate-pulse"
-                    style={{ backgroundColor: "rgba(108, 92, 231, 0.2)" }}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="var(--dg-dim)" stroke="none" className="opacity-40">
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-xs text-[var(--dg-dim)] animate-pulse">Generating voice briefing...</p>
-                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--dg-border)]">
-                      <div className="h-full rounded-full animate-pulse" style={{ width: "40%", backgroundColor: "rgba(108, 92, 231, 0.3)" }} />
+            <div className="flex flex-col">
+              <div className="flex items-center justify-center py-4">
+                {showVoice && analysis?.audio_url ? (
+                  <VoicePlayer audioUrl={analysis.audio_url} />
+                ) : loading ? (
+                  <div className="flex items-center gap-3 px-6">
+                    <div
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full animate-pulse"
+                      style={{ backgroundColor: "rgba(108, 92, 231, 0.2)" }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="var(--dg-dim)" stroke="none" className="opacity-40">
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      </svg>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-xs text-[var(--dg-dim)] animate-pulse">Generating voice briefing...</p>
+                      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--dg-border)]">
+                        <div className="h-full rounded-full animate-pulse" style={{ width: "40%", backgroundColor: "rgba(108, 92, 231, 0.3)" }} />
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="text-center">
-                  <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: "rgba(42, 42, 58, 0.5)" }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="var(--dg-dim)" stroke="none" className="opacity-30">
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
+                ) : (
+                  <div className="text-center">
+                    <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: "rgba(42, 42, 58, 0.5)" }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="var(--dg-dim)" stroke="none" className="opacity-30">
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      </svg>
+                    </div>
+                    <p className="text-xs text-[var(--dg-dim)] opacity-60">Audio memo after analysis</p>
                   </div>
-                  <p className="text-xs text-[var(--dg-dim)] opacity-60">Audio memo after analysis</p>
+                )}
+              </div>
+              {/* Memo Text */}
+              {showVoice && analysis?.memo && (
+                <div className="border-t border-[var(--dg-border)] px-4 py-3 max-h-[200px] overflow-y-auto">
+                  <p className="text-xs leading-relaxed text-[var(--dg-dim)]">
+                    {analysis.memo}
+                  </p>
                 </div>
               )}
             </div>
@@ -662,18 +667,11 @@ function DealGraphApp() {
         ))}
       </div>
 
-      {/* CopilotKit Sidebar */}
-      <CopilotSidebar
-        defaultOpen={false}
-        labels={{
-          title: "DealGraph AI",
-          initial:
-            "I can help you analyze pitch decks. Paste a deck or ask me about investment analysis.",
-        }}
-      />
-
       {/* Toast */}
       <Toast message={toastMessage} visible={toastVisible} />
+
+      {/* Floating CopilotKit Chat Popup */}
+      <CopilotPopupChat analysis={analysis} />
     </div>
   );
 }
